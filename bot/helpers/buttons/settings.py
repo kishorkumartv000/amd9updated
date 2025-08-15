@@ -99,6 +99,12 @@ def core_buttons():
         ],
         [
             InlineKeyboardButton(
+                text=f"Apple Download Mode: {bot_set.apple_session_mode}",
+                callback_data='appleSessionMode'
+            )
+        ],
+        [
+            InlineKeyboardButton(
                 text=lang.s.SORT_PLAYLIST.format(bot_set.playlist_sort),
                 callback_data='sortPlay'
             ),

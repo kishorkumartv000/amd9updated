@@ -108,6 +108,24 @@ sudo docker run -d --env-file .env --name siesta project-siesta
 - `TRACK_NAME_FORMAT` - Naming format for tracks (check [metadata](https://github.com/vinayak-7-0-3/Project-Siesta/blob/2bbea8572d660a92bb182a360e91791583f4523b/bot/helpers/metadata.py#L16) section for tags supported) `(str)`
 - `PLAYLIST_NAME_FORMAT` - Similar to `TRACK_NAME_FORMAT` but for Playlists (Note: all tags might not be available) `(str)`
 
+### Apple Music Session Modes
+
+- `APPLE_SESSION_MODE` controls how Apple Music downloads are isolated. Default is `GLOBAL`.
+  - `GLOBAL`: Current behavior. Uses `$HOME/amalac/config.yaml`. Files are written to the global paths set in that file. Discovery and cleanup are global.
+  - `SESSION_CWD` (Option A): Per-message session. For each request, the bot creates a session folder with its own `config.yaml` that points `alac/atmos/aac` to per-session subfolders and runs the downloader with CWD set to that session folder. No global config changes.
+  - `SESSION_SYMLINK` (Option B): Same isolation as `SESSION_CWD`, but places a symlink named `config.yaml` in the working directory pointing to the session’s `config.yaml`. No global config changes.
+
+How to set:
+- In `.env` or `sample.env`:
+  ```env
+  APPLE_SESSION_MODE=GLOBAL   # or SESSION_CWD or SESSION_SYMLINK
+  ```
+- In Telegram: Settings → Core → “Apple Download Mode: …” cycles the mode and persists to DB.
+
+Notes:
+- In `GLOBAL` mode, the bot does NOT modify `$HOME/amalac/config.yaml`. It just uses it as-is (as you have configured today).
+- In `SESSION_*` modes, the bot does not touch the global config. It generates a per-message `config.yaml` and runs the downloader in that session directory, so concurrent downloads do not interfere.
+
 ## CREDITS
 - OrpheusDL - https://github.com/yarrm80s/orpheusdl
 - Streamrip - https://github.com/nathom/streamrip

@@ -38,10 +38,31 @@ class AppleMusicProvider:
     
     async def process(self, url: str, user: dict, options: dict = None) -> dict:
         """Process Apple Music URL with options"""
-        # Create user-specific directory
+        # Session mode handling
+        from bot.settings import bot_set
+        session_mode = getattr(bot_set, 'apple_session_mode', getattr(Config, 'APPLE_SESSION_MODE', 'GLOBAL')).upper()
+        # Create user-specific base directory
         user_dir = os.path.join(Config.LOCAL_STORAGE, str(user['user_id']), "Apple Music")
         os.makedirs(user_dir, exist_ok=True)
-        LOGGER.info(f"Created Apple Music directory: {user_dir}")
+        # Create per-message session directories when using session modes
+        session_root = os.path.join(user_dir, str(user.get('r_id', 'unknown')))
+        session_cfg_dir = os.path.join(session_root, 'session')
+        session_alac = os.path.join(session_cfg_dir, 'alac')
+        session_atmos = os.path.join(session_cfg_dir, 'atmos')
+        session_aac = os.path.join(session_cfg_dir, 'aac')
+        if session_mode != 'GLOBAL':
+            for p in (session_alac, session_atmos, session_aac):
+                os.makedirs(p, exist_ok=True)
+            # Prepare session config.yaml
+            session_cfg_path = os.path.join(session_cfg_dir, 'config.yaml')
+            try:
+                with open(session_cfg_path, 'w') as f:
+                    f.write(f"alac-save-folder: {session_alac}\n")
+                    f.write(f"atmos-save-folder: {session_atmos}\n")
+                    f.write(f"aac-save-folder: {session_aac}\n")
+                LOGGER.info(f"Session config written: {session_cfg_path}")
+            except Exception as e:
+                LOGGER.error(f"Failed to write session config: {e}")
         
         # Process options
         cmd_options = self.build_options(options)
@@ -54,21 +75,63 @@ class AppleMusicProvider:
         await reporter.set_stage("Preparing")
         
         # Download content
-        result = await run_apple_downloader(
-            url,
-            user_dir,
-            cmd_options,
-            user,
-            progress=reporter,
-            task_id=user.get('task_id'),
-            cancel_event=user.get('cancel_event')
-        )
+        if session_mode == 'GLOBAL':
+            result = await run_apple_downloader(
+                url,
+                user_dir,
+                cmd_options,
+                user,
+                progress=reporter,
+                task_id=user.get('task_id'),
+                cancel_event=user.get('cancel_event')
+            )
+        else:
+            # Build direct go run command and execute in session cfg dir (Option A)
+            go_main = "/root/amalac/main.go"
+            import shutil as _shutil
+            # Ensure go is in PATH; am_downloader.sh set PATH during install, but we rely on absolute
+            cmd = ["/usr/local/go/bin/go", "run", go_main]
+            if cmd_options:
+                cmd.extend(cmd_options)
+            cmd.append(url)
+            LOGGER.info(f"Running Apple downloader (session mode {session_mode}) with cwd={session_cfg_dir}")
+            import asyncio as _asyncio
+            try:
+                proc = await _asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=_asyncio.subprocess.PIPE,
+                    stderr=_asyncio.subprocess.PIPE,
+                    cwd=session_cfg_dir
+                )
+                stdout, stderr = await proc.communicate()
+                if proc.returncode != 0:
+                    LOGGER.error(f"Apple downloader failed (session): {stderr.decode().strip() or stdout.decode().strip()}")
+                    result = {'success': False, 'error': stderr.decode().strip() or stdout.decode().strip()}
+                else:
+                    result = {'success': True}
+            except Exception as e:
+                result = {'success': False, 'error': str(e)}
         if not result['success']:
             LOGGER.error(f"Apple downloader failed: {result['error']}")
+            # On error in session mode, cleanup session folder
+            if session_mode != 'GLOBAL':
+                try:
+                    shutil.rmtree(session_root, ignore_errors=True)
+                except Exception:
+                    pass
             return result
         
-        # Find downloaded files from global Apple folders (alac/atmos/aac)
-        files = list_apple_output_files()
+        # Find downloaded files
+        if session_mode == 'GLOBAL':
+            files = list_apple_output_files()
+        else:
+            # List only in session folders
+            files = []
+            for base in (session_alac, session_atmos, session_aac):
+                for root, _, names in os.walk(base):
+                    for name in names:
+                        if name.lower().endswith(('.m4a', '.flac', '.alac', '.mp4', '.m4v', '.mov')):
+                            files.append(os.path.join(root, name))
         
         if not files:
             LOGGER.error("No files found in global Apple output folders")
@@ -218,9 +281,16 @@ async def start_apple(link: str, user: dict, options: dict = None):
             await user['progress'].set_stage("Finalizing")
         except Exception:
             pass
-        await cleanup(user)
-        # Clean only the contents of global Apple output folders
-        cleanup_apple_global()
+        session_mode = getattr(bot_set, 'apple_session_mode', getattr(Config, 'APPLE_SESSION_MODE', 'GLOBAL')).upper()
+        if session_mode == 'GLOBAL':
+            await cleanup(user)
+            cleanup_apple_global()
+        else:
+            # Remove only session root
+            try:
+                shutil.rmtree(session_root, ignore_errors=True)
+            except Exception:
+                pass
         try:
             await user['progress'].set_stage("Done")
         except Exception:
