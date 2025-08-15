@@ -486,6 +486,23 @@ async def album_zip_cb(client, cb:CallbackQuery):
             pass
 
 
+@Client.on_callback_query(filters.regex(pattern=r"^appleSessionMode$"))
+async def apple_session_mode_cb(client, cb:CallbackQuery):
+    if await check_user(cb.from_user.id, restricted=True):
+        modes = ["GLOBAL", "SESSION_CWD", "SESSION_SYMLINK"]
+        try:
+            current = bot_set.apple_session_mode if getattr(bot_set, 'apple_session_mode', None) else "GLOBAL"
+            idx = modes.index(current) if current in modes else 0
+            nexti = (idx + 1) % len(modes)
+            bot_set.apple_session_mode = modes[nexti]
+            set_db.set_variable('APPLE_SESSION_MODE', bot_set.apple_session_mode)
+        except Exception:
+            pass
+        try:
+            await core_cb(client, cb)
+        except:
+            pass
+
 
 #--------------------
 

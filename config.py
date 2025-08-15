@@ -60,6 +60,7 @@ class Config:
     APPLE_ATMOS_QUALITY   = int(getenv("APPLE_ATMOS_QUALITY", 2768))      # Only 2768 for Atmos
     # Path to Apple Music downloader YAML config
     APPLE_CONFIG_YAML_PATH = getenv("APPLE_CONFIG_YAML_PATH", "/root/amalac/config.yaml")
+    APPLE_SESSION_MODE     = getenv("APPLE_SESSION_MODE", "GLOBAL")
     
     # Optional Settings (via /settings)
     BOT_PUBLIC            = getenv("BOT_PUBLIC", "False")                 # True or False

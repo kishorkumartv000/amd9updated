@@ -105,6 +105,10 @@ class BotSettings:
         self.playlist_zip = _to_bool(__getvalue__('PLAYLIST_ZIP'))
         self.artist_zip = _to_bool(__getvalue__('ARTIST_ZIP'))
 
+        # Apple session mode (GLOBAL, SESSION_CWD, SESSION_SYMLINK)
+        db_session_mode, _ = set_db.get_variable('APPLE_SESSION_MODE')
+        self.apple_session_mode = (db_session_mode or getattr(Config, 'APPLE_SESSION_MODE', 'GLOBAL')).upper()
+
         # New: telegram video upload type
         video_doc, _ = set_db.get_variable('VIDEO_AS_DOCUMENT')
         self.video_as_document = bool(video_doc) if isinstance(video_doc, bool) else (str(video_doc).lower() == 'true')
