@@ -53,13 +53,16 @@ class AppleMusicProvider:
         if session_mode != 'GLOBAL':
             for p in (session_alac, session_atmos, session_aac):
                 os.makedirs(p, exist_ok=True)
-            # Prepare session config.yaml
+            # Prepare session config.yaml (use absolute paths)
             session_cfg_path = os.path.join(session_cfg_dir, 'config.yaml')
             try:
+                abs_alac = os.path.abspath(session_alac)
+                abs_atmos = os.path.abspath(session_atmos)
+                abs_aac = os.path.abspath(session_aac)
                 with open(session_cfg_path, 'w') as f:
-                    f.write(f"alac-save-folder: {session_alac}\n")
-                    f.write(f"atmos-save-folder: {session_atmos}\n")
-                    f.write(f"aac-save-folder: {session_aac}\n")
+                    f.write(f"alac-save-folder: {abs_alac}\n")
+                    f.write(f"atmos-save-folder: {abs_atmos}\n")
+                    f.write(f"aac-save-folder: {abs_aac}\n")
                 LOGGER.info(f"Session config written: {session_cfg_path}")
             except Exception as e:
                 LOGGER.error(f"Failed to write session config: {e}")
@@ -86,12 +89,41 @@ class AppleMusicProvider:
                 cancel_event=user.get('cancel_event')
             )
         else:
+            # Snapshot global Apple output files to detect newly created files
+            from bot.helpers.utils import _read_apple_config_paths
+            pre_paths = _read_apple_config_paths()
+            pre_existing: set[str] = set()
+            for key in ('alac', 'atmos', 'aac'):
+                base = pre_paths.get(key)
+                if not base or not os.path.isdir(base):
+                    continue
+                for root, _, names in os.walk(base):
+                    for name in names:
+                        if name.lower().endswith(('.m4a', '.flac', '.alac', '.mp4', '.m4v', '.mov')):
+                            pre_existing.add(os.path.join(root, name))
+            import time as _time_snap
+            t0 = _time_snap.time()
             # Two session modes supported:
-            # - SESSION_CWD: run compiled binary with CWD=session_cfg_dir so it reads ./config.yaml there
-            # - SESSION_SYMLINK: symlink repo config.yaml -> session config, run `go run .` in repo dir
+            # - SESSION_CWD: run compiled binary; override HOME so downloader reads $HOME/amalac/config.yaml mapped to session config
+            # - SESSION_SYMLINK: run `go run .`; override HOME similarly (no repo symlink needed)
             go_repo_dir = os.path.expanduser("~/amalac")
             go_binary = "/usr/local/go/bin/go"
             import asyncio as _asyncio
+            # Prepare isolated HOME so downloader reads session config at $HOME/amalac/config.yaml
+            ttemp_home = os.path.abspath(os.path.join(session_cfg_dir, '.home'))
+            os.makedirs(os.path.join(ttemp_home, 'amalac'), exist_ok=True)
+            session_cfg_path = os.path.join(session_cfg_dir, 'config.yaml')
+            amalac_cfg_target = os.path.join(ttemp_home, 'amalac', 'config.yaml')
+            # Write a tiny proxy config that points to absolute session paths (already absolute)
+            if not os.path.exists(amalac_cfg_target):
+                try:
+                    with open(session_cfg_path, 'r') as src, open(amalac_cfg_target, 'w') as dst:
+                        dst.write(src.read())
+                except Exception as e:
+                    return {'success': False, 'error': f'Failed to prepare session HOME config: {e}'}
+            # Build env with overridden HOME
+            env_vars = os.environ.copy()
+            env_vars['HOME'] = ttemp_home
             if session_mode == 'SESSION_CWD':
                 # Build the binary once if missing
                 built_bin = os.path.join(go_repo_dir, "amdl")
@@ -102,7 +134,8 @@ class AppleMusicProvider:
                             go_binary, "build", "-o", built_bin, ".",
                             stdout=_asyncio.subprocess.PIPE,
                             stderr=_asyncio.subprocess.PIPE,
-                            cwd=go_repo_dir
+                            cwd=go_repo_dir,
+                            env=env_vars
                         )
                         _, build_err = await proc_build.communicate()
                         if proc_build.returncode != 0:
@@ -113,19 +146,19 @@ class AppleMusicProvider:
                         result = {'success': True}
                 except Exception as e:
                     result = {'success': False, 'error': str(e)}
-                # Run the binary in session dir
+                # Run the binary
                 if result.get('success'):
                     cmd = [built_bin]
                     if cmd_options:
                         cmd.extend(cmd_options)
                     cmd.append(url)
-                    LOGGER.info(f"Running Apple downloader (session mode SESSION_CWD) with binary cwd={session_cfg_dir}")
+                    LOGGER.info(f"Running Apple downloader (session mode SESSION_CWD) with binary (HOME isolated)")
                     try:
                         proc = await _asyncio.create_subprocess_exec(
                             *cmd,
                             stdout=_asyncio.subprocess.PIPE,
                             stderr=_asyncio.subprocess.PIPE,
-                            cwd=session_cfg_dir
+                            env=env_vars
                         )
                         stdout, stderr = await proc.communicate()
                         if proc.returncode != 0:
@@ -136,61 +169,26 @@ class AppleMusicProvider:
                     except Exception as e:
                         result = {'success': False, 'error': str(e)}
             else:
-                # SESSION_SYMLINK (or any other non-GLOBAL session) uses symlink approach
+                # SESSION_SYMLINK (or any other non-GLOBAL session) uses go run with isolated HOME
                 cmd = [go_binary, "run", "."]
                 if cmd_options:
                     cmd.extend(cmd_options)
                 cmd.append(url)
-                LOGGER.info(f"Running Apple downloader (session mode {session_mode}) with module cwd={go_repo_dir}")
-                import time as _time
-                import fcntl as _fcntl
-                # Prepare temporary symlink to session config
-                cfg_target = os.path.join(go_repo_dir, 'config.yaml')
-                backup_path = None
-                lock_path = os.path.join(go_repo_dir, '.session_lock')
-                os.makedirs(go_repo_dir, exist_ok=True)
+                LOGGER.info(f"Running Apple downloader (session mode {session_mode}) with go run (HOME isolated)")
                 try:
-                    with open(lock_path, 'w') as lock_f:
-                        _fcntl.flock(lock_f, _fcntl.LOCK_EX)
-                        # Backup existing config.yaml if present
-                        if os.path.islink(cfg_target) or os.path.exists(cfg_target):
-                            backup_path = cfg_target + f".bak.{int(_time.time())}"
-                            try:
-                                os.replace(cfg_target, backup_path)
-                            except Exception:
-                                backup_path = None
-                        # Create symlink pointing to session config
-                        try:
-                            os.symlink(os.path.join(session_cfg_dir, 'config.yaml'), cfg_target)
-                        except FileExistsError:
-                            pass
-                        # Run downloader
-                        try:
-                            proc = await _asyncio.create_subprocess_exec(
-                                *cmd,
-                                stdout=_asyncio.subprocess.PIPE,
-                                stderr=_asyncio.subprocess.PIPE,
-                                cwd=go_repo_dir
-                            )
-                            stdout, stderr = await proc.communicate()
-                            if proc.returncode != 0:
-                                LOGGER.error(f"Apple downloader failed (session): {stderr.decode().strip() or stdout.decode().strip()}")
-                                result = {'success': False, 'error': stderr.decode().strip() or stdout.decode().strip()}
-                            else:
-                                result = {'success': True}
-                        finally:
-                            # Restore config.yaml
-                            try:
-                                if os.path.islink(cfg_target):
-                                    os.unlink(cfg_target)
-                            except Exception:
-                                pass
-                            if backup_path:
-                                try:
-                                    os.replace(backup_path, cfg_target)
-                                except Exception:
-                                    pass
-                            _fcntl.flock(lock_f, _fcntl.LOCK_UN)
+                    proc = await _asyncio.create_subprocess_exec(
+                        *cmd,
+                        stdout=_asyncio.subprocess.PIPE,
+                        stderr=_asyncio.subprocess.PIPE,
+                        cwd=go_repo_dir,
+                        env=env_vars
+                    )
+                    stdout, stderr = await proc.communicate()
+                    if proc.returncode != 0:
+                        LOGGER.error(f"Apple downloader failed (session): {stderr.decode().strip() or stdout.decode().strip()}")
+                        result = {'success': False, 'error': stderr.decode().strip() or stdout.decode().strip()}
+                    else:
+                        result = {'success': True}
                 except Exception as e:
                     result = {'success': False, 'error': str(e)}
         if not result['success']:
@@ -214,7 +212,38 @@ class AppleMusicProvider:
                     for name in names:
                         if name.lower().endswith(('.m4a', '.flac', '.alac', '.mp4', '.m4v', '.mov')):
                             files.append(os.path.join(root, name))
-        
+            # Fallback: if no files in session, move any new files created in global Apple folders into session
+            if not files:
+                post_new = []
+                for key in ('alac', 'atmos', 'aac'):
+                    base = pre_paths.get(key)
+                    if not base or not os.path.isdir(base):
+                        continue
+                    for root, _, names in os.walk(base):
+                        for name in names:
+                            if not name.lower().endswith(('.m4a', '.flac', '.alac', '.mp4', '.m4v', '.mov')):
+                                continue
+                            fullp = os.path.join(root, name)
+                            if fullp in pre_existing:
+                                continue
+                            try:
+                                st = os.stat(fullp)
+                                if st.st_mtime < t0 - 2:  # older than start (with small slack)
+                                    continue
+                            except Exception:
+                                continue
+                            post_new.append((key, fullp))
+                # Move new files into session folders
+                for key, fullp in post_new:
+                    dest_base = session_alac if key == 'alac' else session_atmos if key == 'atmos' else session_aac
+                    try:
+                        os.makedirs(dest_base, exist_ok=True)
+                        dest_path = os.path.join(dest_base, os.path.basename(fullp))
+                        shutil.move(fullp, dest_path)
+                        files.append(dest_path)
+                    except Exception:
+                        continue
+ 
         if not files:
             if session_mode == 'GLOBAL':
                 LOGGER.error("No files found in global Apple output folders")
@@ -222,7 +251,10 @@ class AppleMusicProvider:
                 LOGGER.error("No files found in session Apple output folders")
             return {'success': False, 'error': "No files downloaded"}
         
-        LOGGER.info(f"Found {len(files)} files in global Apple output folders")
+        if session_mode == 'GLOBAL':
+            LOGGER.info(f"Found {len(files)} files in global Apple output folders")
+        else:
+            LOGGER.info(f"Found {len(files)} files in session Apple output folders")
         
         # Extract metadata
         items = []
