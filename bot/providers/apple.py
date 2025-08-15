@@ -86,44 +86,46 @@ class AppleMusicProvider:
                 cancel_event=user.get('cancel_event')
             )
         else:
-            # Run Go downloader in module directory with a temporary symlinked config (Option A/B isolation)
+            # Two session modes supported:
+            # - SESSION_CWD: run compiled binary with CWD=session_cfg_dir so it reads ./config.yaml there
+            # - SESSION_SYMLINK: symlink repo config.yaml -> session config, run `go run .` in repo dir
             go_repo_dir = os.path.expanduser("~/amalac")
             go_binary = "/usr/local/go/bin/go"
-            cmd = [go_binary, "run", "."]
-            if cmd_options:
-                cmd.extend(cmd_options)
-            cmd.append(url)
-            LOGGER.info(f"Running Apple downloader (session mode {session_mode}) with module cwd={go_repo_dir}")
             import asyncio as _asyncio
-            import time as _time
-            import fcntl as _fcntl
-            # Prepare temporary symlink to session config
-            cfg_target = os.path.join(go_repo_dir, 'config.yaml')
-            backup_path = None
-            lock_path = os.path.join(go_repo_dir, '.session_lock')
-            os.makedirs(go_repo_dir, exist_ok=True)
-            try:
-                with open(lock_path, 'w') as lock_f:
-                    _fcntl.flock(lock_f, _fcntl.LOCK_EX)
-                    # Backup existing config.yaml if present
-                    if os.path.islink(cfg_target) or os.path.exists(cfg_target):
-                        backup_path = cfg_target + f".bak.{int(_time.time())}"
-                        try:
-                            os.replace(cfg_target, backup_path)
-                        except Exception:
-                            backup_path = None
-                    # Create symlink pointing to session config
-                    try:
-                        os.symlink(os.path.join(session_cfg_dir, 'config.yaml'), cfg_target)
-                    except FileExistsError:
-                        pass
-                    # Run downloader
+            if session_mode == 'SESSION_CWD':
+                # Build the binary once if missing
+                built_bin = os.path.join(go_repo_dir, "amdl")
+                try:
+                    if not os.path.exists(built_bin):
+                        LOGGER.info("Building Apple downloader binary for SESSION_CWD mode...")
+                        proc_build = await _asyncio.create_subprocess_exec(
+                            go_binary, "build", "-o", built_bin, ".",
+                            stdout=_asyncio.subprocess.PIPE,
+                            stderr=_asyncio.subprocess.PIPE,
+                            cwd=go_repo_dir
+                        )
+                        _, build_err = await proc_build.communicate()
+                        if proc_build.returncode != 0:
+                            result = {'success': False, 'error': build_err.decode().strip() or 'go build failed'}
+                        else:
+                            result = {'success': True}
+                    else:
+                        result = {'success': True}
+                except Exception as e:
+                    result = {'success': False, 'error': str(e)}
+                # Run the binary in session dir
+                if result.get('success'):
+                    cmd = [built_bin]
+                    if cmd_options:
+                        cmd.extend(cmd_options)
+                    cmd.append(url)
+                    LOGGER.info(f"Running Apple downloader (session mode SESSION_CWD) with binary cwd={session_cfg_dir}")
                     try:
                         proc = await _asyncio.create_subprocess_exec(
                             *cmd,
                             stdout=_asyncio.subprocess.PIPE,
                             stderr=_asyncio.subprocess.PIPE,
-                            cwd=go_repo_dir
+                            cwd=session_cfg_dir
                         )
                         stdout, stderr = await proc.communicate()
                         if proc.returncode != 0:
@@ -131,21 +133,66 @@ class AppleMusicProvider:
                             result = {'success': False, 'error': stderr.decode().strip() or stdout.decode().strip()}
                         else:
                             result = {'success': True}
-                    finally:
-                        # Restore config.yaml
-                        try:
-                            if os.path.islink(cfg_target):
-                                os.unlink(cfg_target)
-                        except Exception:
-                            pass
-                        if backup_path:
+                    except Exception as e:
+                        result = {'success': False, 'error': str(e)}
+            else:
+                # SESSION_SYMLINK (or any other non-GLOBAL session) uses symlink approach
+                cmd = [go_binary, "run", "."]
+                if cmd_options:
+                    cmd.extend(cmd_options)
+                cmd.append(url)
+                LOGGER.info(f"Running Apple downloader (session mode {session_mode}) with module cwd={go_repo_dir}")
+                import time as _time
+                import fcntl as _fcntl
+                # Prepare temporary symlink to session config
+                cfg_target = os.path.join(go_repo_dir, 'config.yaml')
+                backup_path = None
+                lock_path = os.path.join(go_repo_dir, '.session_lock')
+                os.makedirs(go_repo_dir, exist_ok=True)
+                try:
+                    with open(lock_path, 'w') as lock_f:
+                        _fcntl.flock(lock_f, _fcntl.LOCK_EX)
+                        # Backup existing config.yaml if present
+                        if os.path.islink(cfg_target) or os.path.exists(cfg_target):
+                            backup_path = cfg_target + f".bak.{int(_time.time())}"
                             try:
-                                os.replace(backup_path, cfg_target)
+                                os.replace(cfg_target, backup_path)
+                            except Exception:
+                                backup_path = None
+                        # Create symlink pointing to session config
+                        try:
+                            os.symlink(os.path.join(session_cfg_dir, 'config.yaml'), cfg_target)
+                        except FileExistsError:
+                            pass
+                        # Run downloader
+                        try:
+                            proc = await _asyncio.create_subprocess_exec(
+                                *cmd,
+                                stdout=_asyncio.subprocess.PIPE,
+                                stderr=_asyncio.subprocess.PIPE,
+                                cwd=go_repo_dir
+                            )
+                            stdout, stderr = await proc.communicate()
+                            if proc.returncode != 0:
+                                LOGGER.error(f"Apple downloader failed (session): {stderr.decode().strip() or stdout.decode().strip()}")
+                                result = {'success': False, 'error': stderr.decode().strip() or stdout.decode().strip()}
+                            else:
+                                result = {'success': True}
+                        finally:
+                            # Restore config.yaml
+                            try:
+                                if os.path.islink(cfg_target):
+                                    os.unlink(cfg_target)
                             except Exception:
                                 pass
-                        _fcntl.flock(lock_f, _fcntl.LOCK_UN)
-            except Exception as e:
-                result = {'success': False, 'error': str(e)}
+                            if backup_path:
+                                try:
+                                    os.replace(backup_path, cfg_target)
+                                except Exception:
+                                    pass
+                            _fcntl.flock(lock_f, _fcntl.LOCK_UN)
+                except Exception as e:
+                    result = {'success': False, 'error': str(e)}
         if not result['success']:
             LOGGER.error(f"Apple downloader failed: {result['error']}")
             # On error in session mode, cleanup session folder
@@ -169,7 +216,10 @@ class AppleMusicProvider:
                             files.append(os.path.join(root, name))
         
         if not files:
-            LOGGER.error("No files found in global Apple output folders")
+            if session_mode == 'GLOBAL':
+                LOGGER.error("No files found in global Apple output folders")
+            else:
+                LOGGER.error("No files found in session Apple output folders")
             return {'success': False, 'error': "No files downloaded"}
         
         LOGGER.info(f"Found {len(files)} files in global Apple output folders")
