@@ -89,6 +89,20 @@ class AppleMusicProvider:
                 cancel_event=user.get('cancel_event')
             )
         else:
+            # Snapshot global Apple output files to detect newly created files
+            from bot.helpers.utils import _read_apple_config_paths
+            pre_paths = _read_apple_config_paths()
+            pre_existing: set[str] = set()
+            for key in ('alac', 'atmos', 'aac'):
+                base = pre_paths.get(key)
+                if not base or not os.path.isdir(base):
+                    continue
+                for root, _, names in os.walk(base):
+                    for name in names:
+                        if name.lower().endswith(('.m4a', '.flac', '.alac', '.mp4', '.m4v', '.mov')):
+                            pre_existing.add(os.path.join(root, name))
+            import time as _time_snap
+            t0 = _time_snap.time()
             # Two session modes supported:
             # - SESSION_CWD: run compiled binary; override HOME so downloader reads $HOME/amalac/config.yaml mapped to session config
             # - SESSION_SYMLINK: run `go run .`; override HOME similarly (no repo symlink needed)
@@ -198,7 +212,38 @@ class AppleMusicProvider:
                     for name in names:
                         if name.lower().endswith(('.m4a', '.flac', '.alac', '.mp4', '.m4v', '.mov')):
                             files.append(os.path.join(root, name))
-        
+            # Fallback: if no files in session, move any new files created in global Apple folders into session
+            if not files:
+                post_new = []
+                for key in ('alac', 'atmos', 'aac'):
+                    base = pre_paths.get(key)
+                    if not base or not os.path.isdir(base):
+                        continue
+                    for root, _, names in os.walk(base):
+                        for name in names:
+                            if not name.lower().endswith(('.m4a', '.flac', '.alac', '.mp4', '.m4v', '.mov')):
+                                continue
+                            fullp = os.path.join(root, name)
+                            if fullp in pre_existing:
+                                continue
+                            try:
+                                st = os.stat(fullp)
+                                if st.st_mtime < t0 - 2:  # older than start (with small slack)
+                                    continue
+                            except Exception:
+                                continue
+                            post_new.append((key, fullp))
+                # Move new files into session folders
+                for key, fullp in post_new:
+                    dest_base = session_alac if key == 'alac' else session_atmos if key == 'atmos' else session_aac
+                    try:
+                        os.makedirs(dest_base, exist_ok=True)
+                        dest_path = os.path.join(dest_base, os.path.basename(fullp))
+                        shutil.move(fullp, dest_path)
+                        files.append(dest_path)
+                    except Exception:
+                        continue
+ 
         if not files:
             if session_mode == 'GLOBAL':
                 LOGGER.error("No files found in global Apple output folders")
